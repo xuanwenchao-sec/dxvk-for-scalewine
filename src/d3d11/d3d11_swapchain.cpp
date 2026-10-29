@@ -102,7 +102,8 @@ namespace dxvk {
      || riid == __uuidof(IDXGIVkSwapChain)
      || riid == __uuidof(IDXGIVkSwapChain1)
      || riid == __uuidof(IDXGIVkSwapChain2)
-     || riid == __uuidof(IDXGIVkSwapChain3)) {
+     || riid == __uuidof(IDXGIVkSwapChain3)
+     || riid == __uuidof(IDXGIVkSwapChain4)) {
       *ppvObject = ref(this);
       return S_OK;
     }
@@ -578,7 +579,10 @@ namespace dxvk {
 
   void D3D11SwapChain::CreatePresenter() {
     PresenterDesc presenterDesc = { };
-    presenterDesc.deferSurfaceCreation = m_parent->GetOptions()->deferSurfaceCreation;
+    Com<IDXGIVkSurfaceFactory1> surfaceFactory;
+    m_surfaceFactory->QueryInterface(__uuidof(IDXGIVkSurfaceFactory1), reinterpret_cast<void**>(&surfaceFactory));
+    presenterDesc.deferSurfaceCreation = m_parent->GetOptions()->deferSurfaceCreation
+      || (surfaceFactory && surfaceFactory->IsDeferred());
 
     m_presenter = new Presenter(m_device, m_frameLatencySignal, presenterDesc, [
       cAdapter  = m_device->adapter(),
@@ -597,6 +601,16 @@ namespace dxvk {
 
     Com<D3D11ReflexDevice> reflex = GetReflexDevice();
     reflex->RegisterLatencyTracker(m_latency);
+  }
+
+
+  HRESULT STDMETHODCALLTYPE D3D11SwapChain::ReleaseSurface() {
+    auto context = m_parent->GetContext();
+    auto contextLock = context->LockContext();
+    context->ExecuteFlush(GpuFlushType::ExplicitFlush, nullptr, true);
+    context->SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
+    m_presenter->destroyResources();
+    return S_OK;
   }
 
 

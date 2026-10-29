@@ -1,0 +1,513 @@
+diff --git a/dlls/dcomp/dcomp.spec b/dlls/dcomp/dcomp.spec
+index 8a3688c..0c2ef6b 100644
+--- a/dlls/dcomp/dcomp.spec
++++ b/dlls/dcomp/dcomp.spec
+@@ -15,6 +15,7 @@
+ @ stub DCompositionAttachMouseWheelToHwnd
+ @ stdcall DCompositionCreateDevice2(ptr ptr ptr)
+ @ stdcall wine_dcomp_get_current_target_hwnd()
++@ stdcall wine_dcomp_get_composition_binding_version()
+ @ stdcall DCompositionCreateDevice3(ptr ptr ptr)
+ @ stdcall DCompositionCreateDevice(ptr ptr ptr)
+ @ stub DCompositionCreateSurfaceHandle
+diff --git a/dlls/dcomp/device.c b/dlls/dcomp/device.c
+index 7e68323..85b5272 100644
+--- a/dlls/dcomp/device.c
++++ b/dlls/dcomp/device.c
+@@ -17,6 +17,7 @@
+ #include "dcomptypes.h"
+ #include "dcomp.h"
+ #include "dxgi.h"
++#include "wine_dxgi_composition.h"
+ #include "wine/debug.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
+@@ -25,6 +26,7 @@ static DWORD dcomp_target_tls = TLS_OUT_OF_INDEXES;
+ static CRITICAL_SECTION dcomp_target_cs;
+ static struct dcomp_target *dcomp_targets;
+ static ULONG_PTR dcomp_target_next_id;
++static UINT64 dcomp_scene_revision;
+ 
+ struct dcomp_target;
+ static void dcomp_store_current_target(struct dcomp_target *target);
+@@ -59,6 +61,9 @@ struct dcomp_device
+     IDCompositionDevice4 IDCompositionDevice4_iface;
+     IDCompositionDevice5 IDCompositionDevice5_iface;
+     LONG refcount;
++    CRITICAL_SECTION commit_cs;
++    BOOL committing;
++    struct dcomp_binding *bindings;
+ };
+ 
+ struct dcomp_visual
+@@ -84,6 +89,7 @@ struct dcomp_target
+     DWORD thread_id;
+     LONG refcount;
+     HWND hwnd;
++    struct dcomp_device *device;
+     IDCompositionVisual *root;
+ };
+ 
+@@ -119,6 +125,7 @@ static void dcomp_clear_current_target(struct dcomp_target *target)
+     entry = &dcomp_targets;
+     while (*entry && *entry != target) entry = &(*entry)->next;
+     if (*entry) *entry = target->next;
++    ++dcomp_scene_revision;
+     LeaveCriticalSection(&dcomp_target_cs);
+ 
+     if (dcomp_target_tls != TLS_OUT_OF_INDEXES
+@@ -165,7 +172,7 @@ HWND WINAPI wine_dcomp_get_current_target_hwnd(void)
+ }
+ 
+ static struct dcomp_visual *dcomp_visual_create(void);
+-static struct dcomp_target *dcomp_target_create(HWND hwnd);
++static struct dcomp_target *dcomp_target_create(struct dcomp_device *device, HWND hwnd);
+ 
+ static HRESULT dcomp_array_reserve(void ***array, SIZE_T *capacity, SIZE_T count, SIZE_T element_size)
+ {
+@@ -260,8 +267,12 @@ static HRESULT dcomp_device_query_interface_impl(struct dcomp_device *device, RE
+     return S_OK;
+ }
+ 
++#include "composition_binding.c"
++
+ static void dcomp_device_destroy(struct dcomp_device *device)
+ {
++    dcomp_bindings_free(device->bindings, TRUE);
++    DeleteCriticalSection(&device->commit_cs);
+     free(device);
+ }
+ static void dcomp_desktop_device_destroy(struct dcomp_device *device)
+@@ -332,8 +343,7 @@ static HRESULT WINAPI prefix##_##name parameters \
+ 
+ static HRESULT WINAPI dcomp_device_Commit(IDCompositionDevice *iface)
+ {
+-    TRACE("%p.\n", iface);
+-    return S_OK;
++    return dcomp_commit(CONTAINING_RECORD(iface, struct dcomp_device, IDCompositionDevice_iface));
+ }
+ 
+ static HRESULT WINAPI dcomp_device_WaitForCommitCompletion(IDCompositionDevice *iface)
+@@ -396,7 +406,7 @@ static HRESULT WINAPI dcomp_device_CreateTargetForHwnd(IDCompositionDevice *ifac
+     if (!target) return E_POINTER;
+     *target = NULL;
+     if (!hwnd) return E_HANDLE;
+-    if (!(object = dcomp_target_create(hwnd))) return E_OUTOFMEMORY;
++    if (!(object = dcomp_target_create(CONTAINING_RECORD(iface, struct dcomp_device, IDCompositionDevice_iface), hwnd))) return E_OUTOFMEMORY;
+     *target = &object->IDCompositionTarget_iface;
+     return S_OK;
+ }
+@@ -446,8 +456,7 @@ static const IDCompositionDeviceVtbl dcomp_device_vtbl =
+ 
+ static HRESULT WINAPI dcomp_desktop_device_Commit(IDCompositionDesktopDevice *iface)
+ {
+-    TRACE("%p.\n", iface);
+-    return S_OK;
++    return dcomp_commit(CONTAINING_RECORD(iface, struct dcomp_device, IDCompositionDesktopDevice_iface));
+ }
+ 
+ static HRESULT WINAPI dcomp_desktop_device_WaitForCommitCompletion(IDCompositionDesktopDevice *iface)
+@@ -523,7 +532,7 @@ static HRESULT WINAPI dcomp_desktop_device_CreateTargetForHwnd(IDCompositionDesk
+     if (!target) return E_POINTER;
+     *target = NULL;
+     if (!hwnd) return E_HANDLE;
+-    if (!(object = dcomp_target_create(hwnd))) return E_OUTOFMEMORY;
++    if (!(object = dcomp_target_create(CONTAINING_RECORD(iface, struct dcomp_device, IDCompositionDesktopDevice_iface), hwnd))) return E_OUTOFMEMORY;
+     *target = &object->IDCompositionTarget_iface;
+     return S_OK;
+ }
+@@ -808,6 +817,7 @@ static struct dcomp_device *dcomp_device_create(void)
+     device->IDCompositionDevice4_iface.lpVtbl = &dcomp_device4_vtbl;
+     device->IDCompositionDevice5_iface.lpVtbl = &dcomp_device5_vtbl;
+     device->refcount = 1;
++    InitializeCriticalSection(&device->commit_cs);
+     TRACE("created device %p.\n", device);
+     return device;
+ }
+@@ -840,6 +850,7 @@ static void dcomp_visual_destroy(struct dcomp_visual *visual)
+ {
+     IDCompositionVisual *child;
+ 
++    EnterCriticalSection(&dcomp_target_cs);
+     if (visual->content) IUnknown_Release(visual->content);
+     while (visual->child_count)
+     {
+@@ -848,6 +859,7 @@ static void dcomp_visual_destroy(struct dcomp_visual *visual)
+         IDCompositionVisual_Release(child);
+     }
+     free(visual->children);
++    LeaveCriticalSection(&dcomp_target_cs);
+     free(visual);
+ }
+ static void dcomp_visual2_destroy(struct dcomp_visual *visual)
+@@ -896,7 +908,7 @@ DEFINE_VISUAL_SET(SetClipObject, (IDCompositionVisual *iface, IDCompositionClip
+ DEFINE_VISUAL_SET(SetClip, (IDCompositionVisual *iface, const D2D_RECT_F *rect))
+ DEFINE_VISUAL_SET(SetCompositeMode, (IDCompositionVisual *iface, enum DCOMPOSITION_COMPOSITE_MODE mode))
+ 
+-static HRESULT WINAPI dcomp_visual_SetContent(IDCompositionVisual *iface, IUnknown *content)
++static HRESULT WINAPI dcomp_visual_SetContent_locked(IDCompositionVisual *iface, IUnknown *content)
+ {
+     struct dcomp_visual *visual = CONTAINING_RECORD(iface, struct dcomp_visual, IDCompositionVisual_iface);
+ 
+@@ -907,7 +919,18 @@ static HRESULT WINAPI dcomp_visual_SetContent(IDCompositionVisual *iface, IUnkno
+     return S_OK;
+ }
+ 
+-static HRESULT WINAPI dcomp_visual_AddVisual(IDCompositionVisual *iface, IDCompositionVisual *child,
++static HRESULT WINAPI dcomp_visual_SetContent(IDCompositionVisual *iface, IUnknown *content)
++{
++    HRESULT hr;
++
++    EnterCriticalSection(&dcomp_target_cs);
++    hr = dcomp_visual_SetContent_locked(iface, content);
++    if (SUCCEEDED(hr)) ++dcomp_scene_revision;
++    LeaveCriticalSection(&dcomp_target_cs);
++    return hr;
++}
++
++static HRESULT WINAPI dcomp_visual_AddVisual_locked(IDCompositionVisual *iface, IDCompositionVisual *child,
+         BOOL insert_above, IDCompositionVisual *reference)
+ {
+     struct dcomp_visual *visual = CONTAINING_RECORD(iface, struct dcomp_visual, IDCompositionVisual_iface);
+@@ -948,7 +971,18 @@ static HRESULT WINAPI dcomp_visual_AddVisual(IDCompositionVisual *iface, IDCompo
+     return S_OK;
+ }
+ 
+-static HRESULT WINAPI dcomp_visual_RemoveVisual(IDCompositionVisual *iface, IDCompositionVisual *child)
++static HRESULT WINAPI dcomp_visual_AddVisual(IDCompositionVisual *iface, IDCompositionVisual *child, BOOL insert_above, IDCompositionVisual *reference)
++{
++    HRESULT hr;
++
++    EnterCriticalSection(&dcomp_target_cs);
++    hr = dcomp_visual_AddVisual_locked(iface, child, insert_above, reference);
++    if (SUCCEEDED(hr)) ++dcomp_scene_revision;
++    LeaveCriticalSection(&dcomp_target_cs);
++    return hr;
++}
++
++static HRESULT WINAPI dcomp_visual_RemoveVisual_locked(IDCompositionVisual *iface, IDCompositionVisual *child)
+ {
+     struct dcomp_visual *visual = CONTAINING_RECORD(iface, struct dcomp_visual, IDCompositionVisual_iface);
+     struct dcomp_visual *child_object;
+@@ -970,7 +1004,18 @@ static HRESULT WINAPI dcomp_visual_RemoveVisual(IDCompositionVisual *iface, IDCo
+     return E_INVALIDARG;
+ }
+ 
+-static HRESULT WINAPI dcomp_visual_RemoveAllVisuals(IDCompositionVisual *iface)
++static HRESULT WINAPI dcomp_visual_RemoveVisual(IDCompositionVisual *iface, IDCompositionVisual *child)
++{
++    HRESULT hr;
++
++    EnterCriticalSection(&dcomp_target_cs);
++    hr = dcomp_visual_RemoveVisual_locked(iface, child);
++    if (SUCCEEDED(hr)) ++dcomp_scene_revision;
++    LeaveCriticalSection(&dcomp_target_cs);
++    return hr;
++}
++
++static HRESULT WINAPI dcomp_visual_RemoveAllVisuals_locked(IDCompositionVisual *iface)
+ {
+     struct dcomp_visual *visual = CONTAINING_RECORD(iface, struct dcomp_visual, IDCompositionVisual_iface);
+     IDCompositionVisual *child;
+@@ -985,6 +1030,17 @@ static HRESULT WINAPI dcomp_visual_RemoveAllVisuals(IDCompositionVisual *iface)
+     return S_OK;
+ }
+ 
++static HRESULT WINAPI dcomp_visual_RemoveAllVisuals(IDCompositionVisual *iface)
++{
++    HRESULT hr;
++
++    EnterCriticalSection(&dcomp_target_cs);
++    hr = dcomp_visual_RemoveAllVisuals_locked(iface);
++    if (SUCCEEDED(hr)) ++dcomp_scene_revision;
++    LeaveCriticalSection(&dcomp_target_cs);
++    return hr;
++}
++
+ static const IDCompositionVisualVtbl dcomp_visual_vtbl =
+ {
+     dcomp_visual_query_interface,
+@@ -1117,12 +1173,16 @@ static HRESULT dcomp_target_query_interface_impl(struct dcomp_target *target, RE
+ 
+ static void dcomp_target_destroy(struct dcomp_target *target)
+ {
++    EnterCriticalSection(&dcomp_target_cs);
+     dcomp_clear_current_target(target);
+     if (target->root)
+     {
+         --dcomp_visual_from_iface(target->root)->root_count;
+         IDCompositionVisual_Release(target->root);
+     }
++    LeaveCriticalSection(&dcomp_target_cs);
++    dcomp_commit(target->device);
++    IUnknown_Release(&target->device->IUnknown_iface);
+     free(target);
+ }
+ 
+@@ -1143,7 +1203,7 @@ static const IUnknownVtbl dcomp_target_unknown_vtbl =
+     dcomp_target_unknown_add_ref,
+     dcomp_target_unknown_release,
+ };
+-static HRESULT WINAPI dcomp_target_SetRoot(IDCompositionTarget *iface, IDCompositionVisual *root)
++static HRESULT WINAPI dcomp_target_SetRoot_locked(IDCompositionTarget *iface, IDCompositionVisual *root)
+ {
+     struct dcomp_target *target = CONTAINING_RECORD(iface, struct dcomp_target, IDCompositionTarget_iface);
+     struct dcomp_visual *visual;
+@@ -1165,6 +1225,17 @@ static HRESULT WINAPI dcomp_target_SetRoot(IDCompositionTarget *iface, IDComposi
+     return S_OK;
+ }
+ 
++static HRESULT WINAPI dcomp_target_SetRoot(IDCompositionTarget *iface, IDCompositionVisual *root)
++{
++    HRESULT hr;
++
++    EnterCriticalSection(&dcomp_target_cs);
++    hr = dcomp_target_SetRoot_locked(iface, root);
++    if (SUCCEEDED(hr)) ++dcomp_scene_revision;
++    LeaveCriticalSection(&dcomp_target_cs);
++    return hr;
++}
++
+ static const IDCompositionTargetVtbl dcomp_target_vtbl =
+ {
+     dcomp_target_query_interface,
+@@ -1173,7 +1244,7 @@ static const IDCompositionTargetVtbl dcomp_target_vtbl =
+     dcomp_target_SetRoot,
+ };
+ 
+-static struct dcomp_target *dcomp_target_create(HWND hwnd)
++static struct dcomp_target *dcomp_target_create(struct dcomp_device *device, HWND hwnd)
+ {
+     struct dcomp_target *target;
+ 
+@@ -1182,12 +1253,15 @@ static struct dcomp_target *dcomp_target_create(HWND hwnd)
+     target->IDCompositionTarget_iface.lpVtbl = &dcomp_target_vtbl;
+     target->refcount = 1;
+     target->hwnd = hwnd;
++    target->device = device;
++    IUnknown_AddRef(&device->IUnknown_iface);
+ 
+     EnterCriticalSection(&dcomp_target_cs);
+     target->id = ++dcomp_target_next_id;
+     target->thread_id = GetCurrentThreadId();
+     target->next = dcomp_targets;
+     dcomp_targets = target;
++    ++dcomp_scene_revision;
+     LeaveCriticalSection(&dcomp_target_cs);
+ 
+     dcomp_store_current_target(target);
+diff --git a/dlls/dcomp/wine_dxgi_composition.h b/dlls/dcomp/wine_dxgi_composition.h
+new file mode 100644
+index 0000000..cc166b0
+--- /dev/null
++++ b/dlls/dcomp/wine_dxgi_composition.h
+@@ -0,0 +1,22 @@
++#ifndef WINE_DXGI_COMPOSITION_H
++#define WINE_DXGI_COMPOSITION_H
++
++#include <unknwn.h>
++
++static const GUID IID_IWineDXGICompositionBinding = {0xf20b126a, 0xb535, 0x4a7e,
++    {0x98, 0x53, 0xf8, 0x97, 0xe7, 0x62, 0x91, 0x45}};
++
++#undef INTERFACE
++#define INTERFACE IWineDXGICompositionBinding
++DECLARE_INTERFACE_(IWineDXGICompositionBinding, IUnknown)
++{
++    STDMETHOD(QueryInterface)(THIS_ REFIID iid, void **out) PURE;
++    STDMETHOD_(ULONG, AddRef)(THIS) PURE;
++    STDMETHOD_(ULONG, Release)(THIS) PURE;
++    STDMETHOD(BindTarget)(THIS_ HWND hwnd, UINT64 binding_id) PURE;
++    STDMETHOD(UnbindTarget)(THIS_ UINT64 binding_id) PURE;
++};
++
++#undef INTERFACE
++
++#endif
+diff --git a/dlls/dcomp/composition_binding.c b/dlls/dcomp/composition_binding.c
+new file mode 100644
+index 0000000..32a3e64
+--- /dev/null
++++ b/dlls/dcomp/composition_binding.c
+@@ -0,0 +1,181 @@
++struct dcomp_binding
++{
++    struct dcomp_binding *next;
++    IUnknown *content;
++    IUnknown *identity;
++    IWineDXGICompositionBinding *iface;
++    HWND hwnd;
++    UINT64 id;
++};
++
++UINT WINAPI wine_dcomp_get_composition_binding_version(void)
++{
++    return 1;
++}
++
++static HRESULT dcomp_binding_unbind(struct dcomp_binding *binding)
++{
++    return binding->iface->lpVtbl->UnbindTarget(binding->iface, binding->id);
++}
++
++static void dcomp_bindings_free(struct dcomp_binding *bindings, BOOL unbind)
++{
++    struct dcomp_binding *next;
++
++    while (bindings)
++    {
++        next = bindings->next;
++        if (bindings->iface)
++        {
++            if (unbind) dcomp_binding_unbind(bindings);
++            bindings->iface->lpVtbl->Release(bindings->iface);
++        }
++        if (bindings->identity) IUnknown_Release(bindings->identity);
++        IUnknown_Release(bindings->content);
++        free(bindings);
++        bindings = next;
++    }
++}
++
++static HRESULT dcomp_snapshot_visual(struct dcomp_visual *visual, struct dcomp_target *target,
++        struct dcomp_binding **bindings, unsigned int depth)
++{
++    struct dcomp_binding *binding;
++    SIZE_T index;
++    HRESULT hr;
++
++    if (depth > 256) return E_INVALIDARG;
++    if (visual->content)
++    {
++        if (!(binding = calloc(1, sizeof(*binding)))) return E_OUTOFMEMORY;
++        binding->content = visual->content;
++        IUnknown_AddRef(binding->content);
++        binding->hwnd = target->hwnd;
++        binding->id = target->id;
++        binding->next = *bindings;
++        *bindings = binding;
++    }
++    for (index = 0; index < visual->child_count; ++index)
++    {
++        hr = dcomp_snapshot_visual(dcomp_visual_from_iface(visual->children[index]), target, bindings, depth + 1);
++        if (FAILED(hr)) return hr;
++    }
++    return S_OK;
++}
++
++static BOOL dcomp_binding_matches(struct dcomp_binding *left, struct dcomp_binding *right)
++{
++    return left->identity == right->identity && left->id == right->id && left->hwnd == right->hwnd;
++}
++
++static BOOL dcomp_binding_contains(struct dcomp_binding *bindings, struct dcomp_binding *binding)
++{
++    while (bindings)
++    {
++        if (dcomp_binding_matches(bindings, binding)) return TRUE;
++        bindings = bindings->next;
++    }
++    return FALSE;
++}
++
++static HRESULT dcomp_resolve_bindings(struct dcomp_binding **bindings)
++{
++    struct dcomp_binding **entry = bindings, *binding, *previous;
++    HRESULT hr;
++
++    while ((binding = *entry))
++    {
++        hr = IUnknown_QueryInterface(binding->content, &IID_IWineDXGICompositionBinding, (void **)&binding->iface);
++        if (hr == E_NOINTERFACE)
++        {
++            *entry = binding->next;
++            binding->next = NULL;
++            dcomp_bindings_free(binding, FALSE);
++            continue;
++        }
++        if (FAILED(hr)) return hr;
++        hr = IUnknown_QueryInterface(binding->content, &IID_IUnknown, (void **)&binding->identity);
++        if (FAILED(hr)) return hr;
++        for (previous = *bindings; previous != binding; previous = previous->next)
++        {
++            if (previous->identity == binding->identity || previous->hwnd == binding->hwnd)
++            {
++                if (!dcomp_binding_matches(previous, binding)) return E_INVALIDARG;
++                break;
++            }
++        }
++        if (previous != binding)
++        {
++            *entry = binding->next;
++            binding->next = NULL;
++            dcomp_bindings_free(binding, FALSE);
++            continue;
++        }
++        entry = &binding->next;
++    }
++    return S_OK;
++}
++
++static HRESULT dcomp_commit(struct dcomp_device *device)
++{
++    struct dcomp_binding *bindings = NULL, *binding;
++    struct dcomp_target *target;
++    UINT64 revision;
++    HRESULT hr = S_OK;
++
++    if (!TryEnterCriticalSection(&device->commit_cs)) return E_PENDING;
++    if (device->committing)
++    {
++        LeaveCriticalSection(&device->commit_cs);
++        return E_PENDING;
++    }
++    device->committing = TRUE;
++    EnterCriticalSection(&dcomp_target_cs);
++    revision = dcomp_scene_revision;
++    for (target = dcomp_targets; target; target = target->next)
++    {
++        if (target->device != device || !target->root) continue;
++        hr = dcomp_snapshot_visual(dcomp_visual_from_iface(target->root), target, &bindings, 0);
++        if (FAILED(hr)) break;
++    }
++    LeaveCriticalSection(&dcomp_target_cs);
++    if (FAILED(hr)) goto done;
++    if (FAILED(hr = dcomp_resolve_bindings(&bindings))) goto done;
++    EnterCriticalSection(&dcomp_target_cs);
++    if (revision != dcomp_scene_revision) hr = E_PENDING;
++    LeaveCriticalSection(&dcomp_target_cs);
++    if (FAILED(hr)) goto done;
++    for (binding = device->bindings; binding; binding = binding->next)
++    {
++        if (dcomp_binding_contains(bindings, binding)) continue;
++        if (FAILED(hr = dcomp_binding_unbind(binding))) goto rollback;
++    }
++    for (binding = bindings; binding; binding = binding->next)
++    {
++        if (dcomp_binding_contains(device->bindings, binding)) continue;
++        hr = binding->iface->lpVtbl->BindTarget(binding->iface, binding->hwnd, binding->id);
++        TRACE("content %p, target %s, hwnd %p, hr %#lx.\n", binding->identity,
++                wine_dbgstr_longlong(binding->id), binding->hwnd, hr);
++        if (FAILED(hr)) goto rollback;
++    }
++    EnterCriticalSection(&dcomp_target_cs);
++    if (revision != dcomp_scene_revision) hr = E_PENDING;
++    if (SUCCEEDED(hr))
++    {
++        binding = device->bindings;
++        device->bindings = bindings;
++        bindings = binding;
++    }
++    LeaveCriticalSection(&dcomp_target_cs);
++    if (SUCCEEDED(hr)) goto done;
++rollback:
++    for (binding = bindings; binding; binding = binding->next)
++        dcomp_binding_unbind(binding);
++    dcomp_bindings_free(device->bindings, TRUE);
++    device->bindings = NULL;
++done:
++    dcomp_bindings_free(bindings, FALSE);
++    device->committing = FALSE;
++    LeaveCriticalSection(&device->commit_cs);
++    return hr;
++}

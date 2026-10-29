@@ -203,6 +203,7 @@ namespace dxvk {
 
   Rc<DxvkCommandList> DxvkContext::beginExternalRendering() {
     // Flush and invalidate everything
+    endCurrentPass(false);
     endCurrentCommands();
     beginCurrentCommands();
 

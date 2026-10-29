@@ -58,6 +58,8 @@ namespace dxvk {
     /// Enable support for dummy composition swapchains
     bool enableDummyCompositionSwapchain;
 
+    bool enableWineCompositionBridge;
+
     /// Limit frame rate
     int32_t maxFrameRate;
 

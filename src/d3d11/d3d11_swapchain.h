@@ -14,7 +14,7 @@ namespace dxvk {
   class D3D11Device;
   class D3D11DXGIDevice;
 
-  class D3D11SwapChain : public ComObject<IDXGIVkSwapChain3> {
+  class D3D11SwapChain : public ComObject<IDXGIVkSwapChain4> {
     constexpr static uint32_t DefaultFrameLatency = 1;
   public:
 
@@ -25,6 +25,8 @@ namespace dxvk {
       const DXGI_SWAP_CHAIN_DESC1*    pDesc);
     
     ~D3D11SwapChain();
+
+    HRESULT STDMETHODCALLTYPE ReleaseSurface() final;
 
     HRESULT STDMETHODCALLTYPE QueryInterface(
             REFIID                    riid,

@@ -14,13 +14,14 @@ namespace dxvk {
    * Provides a way to transparently create a
    * Vulkan surface for a given platform window.
    */
-  class DxgiSurfaceFactory : public ComObject<IDXGIVkSurfaceFactory> {
+  class DxgiSurfaceFactory : public ComObject<IDXGIVkSurfaceFactory1> {
 
   public:
 
     DxgiSurfaceFactory(
             PFN_vkGetInstanceProcAddr vulkanLoaderProc,
-            HWND                      hWnd);
+            HWND                      hWnd,
+            bool                      composition = false);
 
     ~DxgiSurfaceFactory();
 
@@ -33,11 +34,16 @@ namespace dxvk {
             VkPhysicalDevice          Adapter,
             VkSurfaceKHR*             pSurface);
 
+    void SetWindow(HWND window);
+
+    BOOL STDMETHODCALLTYPE IsDeferred() final { return m_composition; }
+
   private:
 
     PFN_vkGetInstanceProcAddr m_vkGetInstanceProcAddr = nullptr;
     HWND                      m_window = nullptr;
     bool                      m_ownsWindow = false;
+    bool                      m_composition = false;
 
     HWND CreateDummyWindow();
 

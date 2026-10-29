@@ -8,6 +8,38 @@ The most recent development builds can be found [here](https://github.com/doitsu
 
 Release builds can be found [here](https://github.com/doitsujin/dxvk/releases).
 
+## ScaleWine AutoCAD composition bridge: required Wine patch
+
+This fork's opt-in composition path requires **both** a patched Wine DComp and
+matching DXVK `dxgi.dll` / `d3d11.dll` from this build. Replacing DXVK alone is
+not sufficient. The AutoCAD 2024 Home page displayed correctly in an isolated
+64-bit test prefix on 2026-10-29, with user confirmation; this is not full
+DirectComposition or complete AutoCAD release qualification.
+
+Required conditions:
+
+- Apply `patches/wine-dcomp-explicit-binding-v1.patch` to the compatible ScaleWine
+  AutoCAD baseline `a23f56c9b0e5a8e4c4542fea5faeab1fadf70dc9`, or port its
+  behavior to your Wine tree. This incremental patch relies on that baseline's
+  existing DComp interfaces and visual-tree implementation; it is not a standalone
+  patch for arbitrary stock Wine.
+- The loaded Wine `dcomp.dll` must export
+  `UINT WINAPI wine_dcomp_get_composition_binding_version(void)` returning `1`,
+  and its `Commit()` must derive content ownership from the real visual tree and
+  invoke the private `IWineDXGICompositionBinding` interface. The older
+  `wine_dcomp_get_current_target_hwnd()` export alone is **not sufficient**.
+- Install matching-architecture `dxgi.dll` and `d3d11.dll` from this fork together;
+  ensure the application and WebView2 GPU subprocess actually load them and the
+  patched DComp. Use an isolated prefix and back up the previous DLLs first.
+- Enable `dxgi.enableWineCompositionBridge = True` in the configuration passed
+  through `DXVK_CONFIG_FILE`. The default is `False`.
+
+The implementation uses explicit target binding instead of the latest-target
+heuristic. It defers window presentation until DComp Commit supplies the correct
+HWND, while preserving the D3D11 backbuffers. See `WINE_COMPOSITION.md` for the
+protocol, deployment details and current limitations. These prerequisites apply
+to this private bridge, not to ordinary DXVK HWND swapchains.
+
 ## How to use
 In order to install a DXVK package obtained from the [release](https://github.com/doitsujin/dxvk/releases) page into a given wine prefix, copy or symlink the DLLs into the following directories as follows, then open `winecfg` and manually add `native` DLL overrides for `d3d8`, `d3d9`, `d3d10core`, `d3d11` and `dxgi` under the Libraries tab.
 

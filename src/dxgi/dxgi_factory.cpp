@@ -15,6 +15,29 @@ namespace dxvk {
   static dxvk::mutex               s_globalHDRStateMutex;
   static DXVK_VK_GLOBAL_HDR_STATE  s_globalHDRState{};
 
+  static bool HasWineCompositionBinding() {
+#ifdef _WIN32
+    using GetBindingVersion = UINT (WINAPI*)();
+    HMODULE module = nullptr;
+
+    if (!GetModuleHandleExW(0, L"dcomp.dll", &module)) {
+      Logger::err("DXGI: Wine composition bridge requires a loaded dcomp.dll");
+      return false;
+    }
+
+    auto getVersion = reinterpret_cast<GetBindingVersion>(
+      GetProcAddress(module, "wine_dcomp_get_composition_binding_version"));
+    bool supported = getVersion && getVersion() == 1;
+    FreeLibrary(module);
+    if (!supported)
+      Logger::err("DXGI: Wine DComp explicit composition binding version 1 is required");
+    return supported;
+#else
+    Logger::err("DXGI: Wine composition bridge requires a Windows build running under Wine");
+    return false;
+#endif
+  }
+
   DxgiVkFactory::DxgiVkFactory(DxgiFactory* pFactory)
   : m_factory(pFactory) {
 
@@ -286,6 +309,16 @@ namespace dxvk {
           IDXGISwapChain1**     ppSwapChain) {
     InitReturnPtr(ppSwapChain);
 
+    if (m_options->enableWineCompositionBridge) {
+      if (!pDevice || !pDesc || !ppSwapChain)
+        return DXGI_ERROR_INVALID_CALL;
+
+      if (!HasWineCompositionBinding())
+        return DXGI_ERROR_INVALID_CALL;
+      return CreateSwapChainBase(pDevice, nullptr,
+        pDesc, nullptr, pRestrictToOutput, ppSwapChain);
+    }
+
     if (!m_options->enableDummyCompositionSwapchain) {
       Logger::err("DxgiFactory::CreateSwapChainForComposition: Not implemented");
       return E_NOTIMPL;
@@ -556,8 +589,9 @@ namespace dxvk {
     Com<IDXGIVkSwapChainFactory> dxvkFactory;
 
     if (SUCCEEDED(pDevice->QueryInterface(IID_PPV_ARGS(&dxvkFactory)))) {
-      Com<IDXGIVkSurfaceFactory> surfaceFactory = new DxgiSurfaceFactory(
-        m_instance->vki()->getLoaderProc(), hWnd);
+      bool composition = !hWnd && m_options->enableWineCompositionBridge;
+      Com<DxgiSurfaceFactory> surfaceFactory = new DxgiSurfaceFactory(
+        m_instance->vki()->getLoaderProc(), hWnd, composition);
 
       Com<IDXGIVkSwapChain> presenter;
       HRESULT hr = dxvkFactory->CreateSwapChain(surfaceFactory.ptr(), &desc, &presenter);
@@ -567,7 +601,13 @@ namespace dxvk {
         return hr;
       }
 
-      frontendSwapChain = new DxgiSwapChain(this, presenter.ptr(), hWnd, &desc, &fsDesc, pDevice);
+      if (composition) {
+        Com<IDXGIVkSwapChain4> compositionPresenter;
+        if (FAILED(presenter->QueryInterface(__uuidof(IDXGIVkSwapChain4), reinterpret_cast<void**>(&compositionPresenter))))
+          return DXGI_ERROR_UNSUPPORTED;
+      }
+      frontendSwapChain = new DxgiSwapChain(this, presenter.ptr(), hWnd, &desc, &fsDesc, pDevice,
+        composition ? surfaceFactory.ptr() : nullptr);
     } else {
       Logger::err("DXGI: CreateSwapChainForHwnd: Unsupported device type");
       return DXGI_ERROR_UNSUPPORTED;

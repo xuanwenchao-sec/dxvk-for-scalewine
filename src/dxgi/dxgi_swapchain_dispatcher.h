@@ -4,7 +4,7 @@
 
 namespace dxvk {
 
-  class DxgiSwapChainDispatcher : public IDXGISwapChain4 {
+  class DxgiSwapChainDispatcher : public IDXGISwapChain4, public IWineDXGICompositionBinding {
 
   public:
 
@@ -61,12 +61,33 @@ namespace dxvk {
         return S_OK;
       }
 
+      if (riid == IID_IWineDXGICompositionBinding) {
+        Com<IWineDXGICompositionBinding> binding;
+        HRESULT result = m_dispatch->QueryInterface(riid, reinterpret_cast<void**>(&binding));
+        if (FAILED(result))
+          return result;
+        *ppvObject = ref(static_cast<IWineDXGICompositionBinding*>(this));
+        return S_OK;
+      }
+
       if (logQueryInterfaceError(__uuidof(IDXGISwapChain), riid)) {
         Logger::warn("DxgiSwapChainDispatcher::QueryInterface: Unknown interface query");
         Logger::warn(str::format(riid));
       }
 
       return m_dispatch->QueryInterface(riid, ppvObject);
+    }
+
+    HRESULT STDMETHODCALLTYPE BindTarget(HWND window, UINT64 bindingId) final {
+      Com<IWineDXGICompositionBinding> binding;
+      HRESULT result = m_dispatch->QueryInterface(IID_IWineDXGICompositionBinding, reinterpret_cast<void**>(&binding));
+      return SUCCEEDED(result) ? binding->BindTarget(window, bindingId) : result;
+    }
+
+    HRESULT STDMETHODCALLTYPE UnbindTarget(UINT64 bindingId) final {
+      Com<IWineDXGICompositionBinding> binding;
+      HRESULT result = m_dispatch->QueryInterface(IID_IWineDXGICompositionBinding, reinterpret_cast<void**>(&binding));
+      return SUCCEEDED(result) ? binding->UnbindTarget(bindingId) : result;
     }
 
     HRESULT STDMETHODCALLTYPE GetPrivateData(

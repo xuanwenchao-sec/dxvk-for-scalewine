@@ -4,9 +4,10 @@
 
 namespace dxvk {
 
-  DxgiSurfaceFactory::DxgiSurfaceFactory(PFN_vkGetInstanceProcAddr vulkanLoaderProc, HWND hWnd)
-  : m_vkGetInstanceProcAddr(vulkanLoaderProc), m_window(hWnd), m_ownsWindow(!hWnd) {
-    if (!m_window)
+  DxgiSurfaceFactory::DxgiSurfaceFactory(PFN_vkGetInstanceProcAddr vulkanLoaderProc, HWND hWnd, bool composition)
+  : m_vkGetInstanceProcAddr(vulkanLoaderProc), m_window(hWnd), m_ownsWindow(!hWnd && !composition),
+    m_composition(composition) {
+    if (m_ownsWindow)
       m_window = CreateDummyWindow();
   }
 
@@ -26,7 +27,8 @@ namespace dxvk {
     *ppvObject = nullptr;
 
     if (riid == __uuidof(IUnknown)
-     || riid == __uuidof(IDXGIVkSurfaceFactory)) {
+     || riid == __uuidof(IDXGIVkSurfaceFactory)
+     || riid == __uuidof(IDXGIVkSurfaceFactory1)) {
       *ppvObject = ref(this);
       return S_OK;
     }
@@ -44,7 +46,15 @@ namespace dxvk {
           VkInstance                Instance,
           VkPhysicalDevice          Adapter,
           VkSurfaceKHR*             pSurface) {
+    if (m_composition && !m_window) {
+      *pSurface = VK_NULL_HANDLE;
+      return VK_NOT_READY;
+    }
     return wsi::createSurface(m_window, m_vkGetInstanceProcAddr, Instance, pSurface);
+  }
+
+  void DxgiSurfaceFactory::SetWindow(HWND window) {
+    m_window = window;
   }
 
 

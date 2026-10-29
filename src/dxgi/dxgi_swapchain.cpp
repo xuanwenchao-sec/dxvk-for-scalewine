@@ -14,8 +14,10 @@ namespace dxvk {
           HWND                        hWnd,
     const DXGI_SWAP_CHAIN_DESC1*      pDesc,
     const DXGI_SWAP_CHAIN_FULLSCREEN_DESC*  pFullscreenDesc,
-          IUnknown*                   pDevice)
-  : m_factory   (pFactory),
+          IUnknown*                   pDevice,
+          DxgiSurfaceFactory*         compositionFactory)
+  : m_compositionFactory(compositionFactory),
+    m_factory   (pFactory),
     m_window    (hWnd),
     m_desc      (*pDesc),
     m_descFs    (*pFullscreenDesc),
@@ -33,6 +35,7 @@ namespace dxvk {
     m_presenter->QueryInterface(__uuidof(IDXGIVkSwapChain1), reinterpret_cast<void**>(&m_presenter1));
     m_presenter->QueryInterface(__uuidof(IDXGIVkSwapChain2), reinterpret_cast<void**>(&m_presenter2));
     m_presenter->QueryInterface(__uuidof(IDXGIVkSwapChain3), reinterpret_cast<void**>(&m_presenter3));
+    m_presenter->QueryInterface(__uuidof(IDXGIVkSwapChain4), reinterpret_cast<void**>(&m_presenter4));
 
     m_frameRateOption = m_factory->GetOptions()->maxFrameRate;
 
@@ -91,6 +94,11 @@ namespace dxvk {
      || riid == __uuidof(IDXGISwapChain3)
      || riid == __uuidof(IDXGISwapChain4)) {
       *ppvObject = ref(this);
+      return S_OK;
+    }
+
+    if (riid == IID_IWineDXGICompositionBinding && m_compositionFactory && m_presenter4) {
+      *ppvObject = ref(&m_compositionBinding);
       return S_OK;
     }
 
@@ -356,6 +364,15 @@ namespace dxvk {
     if (SyncInterval > 4)
       return DXGI_ERROR_INVALID_CALL;
 
+    if (m_compositionFactory) {
+      std::lock_guard<dxvk::recursive_mutex> lockWin(m_lockWindow);
+      if (!m_window) {
+        if (!(PresentFlags & DXGI_PRESENT_TEST))
+          m_compositionPendingPresent = true;
+        return S_OK;
+      }
+    }
+
     if ((m_desc.SwapEffect == DXGI_SWAP_EFFECT_DISCARD || m_desc.SwapEffect == DXGI_SWAP_EFFECT_SEQUENTIAL) && wsi::isMinimized(m_window))
       return DXGI_STATUS_OCCLUDED;
     bool occluded = !m_descFs.Windowed && wsi::isOccluded(m_window) && !wsi::isMinimized(m_window);
@@ -410,6 +427,49 @@ namespace dxvk {
     }
 
     return hr;
+  }
+
+
+  HRESULT DxgiSwapChain::BindCompositionTarget(HWND window, UINT64 bindingId) {
+    if (!window || !bindingId || !wsi::isWindow(window))
+      return DXGI_ERROR_INVALID_CALL;
+    std::lock_guard<dxvk::recursive_mutex> lockWin(m_lockWindow);
+    std::lock_guard<dxvk::mutex> lockBuf(m_lockBuffer);
+    if (m_window == window && m_compositionBindingId == bindingId)
+      return S_OK;
+    if (m_compositionBindingId)
+      return DXGI_ERROR_INVALID_CALL;
+    HRESULT result = m_presenter4->ReleaseSurface();
+    if (FAILED(result))
+      return result;
+    m_compositionFactory->SetWindow(window);
+    m_window = window;
+    m_monitor = wsi::getWindowMonitor(window);
+    m_compositionBindingId = bindingId;
+    Logger::info(str::format("DXGI: Explicit composition binding ", this,
+      " HWND ", window, " owner ", bindingId));
+    if (m_compositionPendingPresent) {
+      result = m_presenter->Present(0, 0, nullptr);
+      if (SUCCEEDED(result))
+        m_compositionPendingPresent = false;
+    }
+    return result;
+  }
+
+
+  HRESULT DxgiSwapChain::UnbindCompositionTarget(UINT64 bindingId) {
+    std::lock_guard<dxvk::recursive_mutex> lockWin(m_lockWindow);
+    std::lock_guard<dxvk::mutex> lockBuf(m_lockBuffer);
+    if (m_compositionBindingId != bindingId)
+      return S_FALSE;
+    HRESULT result = m_presenter4->ReleaseSurface();
+    if (FAILED(result))
+      return result;
+    m_compositionFactory->SetWindow(nullptr);
+    m_window = nullptr;
+    m_monitor = nullptr;
+    m_compositionBindingId = 0;
+    return S_OK;
   }
   
   

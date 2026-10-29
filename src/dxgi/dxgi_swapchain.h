@@ -6,6 +6,7 @@
 #include "dxgi_interfaces.h"
 #include "dxgi_monitor.h"
 #include "dxgi_object.h"
+#include "dxgi_surface.h"
 
 #include "../d3d11/d3d11_interfaces.h"
 
@@ -31,7 +32,8 @@ namespace dxvk {
             HWND                        hWnd,
       const DXGI_SWAP_CHAIN_DESC1*      pDesc,
       const DXGI_SWAP_CHAIN_FULLSCREEN_DESC*  pFullscreenDesc,
-            IUnknown*                   pDevice);
+            IUnknown*                   pDevice,
+            DxgiSurfaceFactory*         compositionFactory = nullptr);
     
     ~DxgiSwapChain();
     
@@ -177,6 +179,32 @@ namespace dxvk {
       const DXGI_RGB*                 pGammaCurve);
     
   private:
+
+    class CompositionBinding final : public IWineDXGICompositionBinding {
+    public:
+      explicit CompositionBinding(DxgiSwapChain* parent) : m_parent(parent) { }
+      HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) final {
+        return m_parent->QueryInterface(iid, output);
+      }
+      ULONG STDMETHODCALLTYPE AddRef() final { return m_parent->AddRef(); }
+      ULONG STDMETHODCALLTYPE Release() final { return m_parent->Release(); }
+      HRESULT STDMETHODCALLTYPE BindTarget(HWND window, UINT64 bindingId) final {
+        return m_parent->BindCompositionTarget(window, bindingId);
+      }
+      HRESULT STDMETHODCALLTYPE UnbindTarget(UINT64 bindingId) final {
+        return m_parent->UnbindCompositionTarget(bindingId);
+      }
+    private:
+      DxgiSwapChain* m_parent;
+    };
+
+    HRESULT BindCompositionTarget(HWND window, UINT64 bindingId);
+    HRESULT UnbindCompositionTarget(UINT64 bindingId);
+
+    CompositionBinding             m_compositionBinding { this };
+    Com<DxgiSurfaceFactory>         m_compositionFactory;
+    UINT64                         m_compositionBindingId = 0;
+    bool                           m_compositionPendingPresent = false;
     
     dxvk::recursive_mutex           m_lockWindow;
     dxvk::mutex                     m_lockBuffer;
@@ -196,6 +224,7 @@ namespace dxvk {
     Com<IDXGIVkSwapChain1>          m_presenter1;
     Com<IDXGIVkSwapChain2>          m_presenter2;
     Com<IDXGIVkSwapChain3>          m_presenter3;
+    Com<IDXGIVkSwapChain4>          m_presenter4;
     
     HMONITOR                        m_monitor;
     bool                            m_monitorHasOutput = true;
