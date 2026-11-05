@@ -21,6 +21,8 @@ AutoCAD baseline `a23f56c9b0e5a8e4c4542fea5faeab1fadf70dc9`, or port the behavio
 The patch depends on that baseline's DComp interfaces/visual tree; it is not a
 standalone patch for arbitrary stock Wine. Added implementation file
 `composition_binding.c` is included by `device.c`, not separately compiled.
+See `patches/README.md` for the source-change inventory, application procedure
+and combined DXVK/DComp binary-package layout.
 
 The loaded `dcomp.dll` must export:
 
@@ -92,8 +94,8 @@ explicit-binding composition path.
 
 Use an isolated prefix, stop its application before replacing DLLs and back up
 DLLs, symlinks and overrides. The successful test uses `autocad2024-dxvk311-test`;
-the production prefix is not changed. Source changes and this README are local
-until explicitly committed and pushed.
+the production prefix is not changed. Binary packaging does not install files
+into any prefix or extend the validation scope below.
 
 ## Validation scope
 
