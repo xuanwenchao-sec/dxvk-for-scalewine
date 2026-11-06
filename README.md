@@ -39,8 +39,14 @@ heuristic. It defers window presentation until DComp Commit supplies the correct
 HWND, while preserving the D3D11 backbuffers. See `WINE_COMPOSITION.md` for the
 protocol, deployment details and current limitations. These prerequisites apply
 to this private bridge, not to ordinary DXVK HWND swapchains.
+## How to use dxvk-for-scalewine
+Make sure dcomp.dll is native in your prefix and load composition config file that would be as follows:
+```
+prefix=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+export DXVK_CONFIG_FILE="$prefix/scalewine-config/dxvk-composition.conf"
+```
 
-## How to use
+## How to use dxvk
 In order to install a DXVK package obtained from the [release](https://github.com/doitsujin/dxvk/releases) page into a given wine prefix, copy or symlink the DLLs into the following directories as follows, then open `winecfg` and manually add `native` DLL overrides for `d3d8`, `d3d9`, `d3d10core`, `d3d11` and `dxgi` under the Libraries tab.
 
 In a default Wine prefix that would be as follows:
